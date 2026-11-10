@@ -7,9 +7,10 @@
 </head>
 <body>
 <div id="info">
-	CAVE Simulator. The head and teapot are draggable. <br />
-	"L" See from Left Eye | "R" See from Right Eye | "S" toggle show scene  <br />
+	CAVE Simulator. The head, the objects and the yellow probe are draggable. Use the panel to move the head, change the IOD and move/scale the scene. <br />
+	"L" See from Left Eye | "R" See from Right Eye | "S" toggle show scene | "F" toggle frustums | "P" toggle parallax probe <br />
 </div>
+<div id="probeInfo"></div>
 
 <!-- Check: https://threejs.org/docs/index.html#manual/en/introduction/Installation 
 for alternative installations -->
@@ -28,6 +29,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { DragControls } from 'three/addons/controls/DragControls.js';
 import { TeapotGeometry } from 'three/addons/geometries/TeapotGeometry.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
 
 class DisplaySurface 
 {
@@ -77,16 +79,22 @@ var displaySurfaces, displaySurfaceScene, displaySurfaceTargets;
 var eyeCenter, eyeScene; 
 var orbitControl;
 var showScene = true;
+var sceneRoot, draggableObjects = [];
+var params, gui;
+var frustumLines, probeRayL, probeRayR, probeHitL, probeHitR;
+var showFrustums = false, showProbe = true;
 
 function addDragControlToObjects()
 {
-    var objects = [];
-    objects.push(scene.getObjectByName("Teapot"));
+    var objects = draggableObjects.slice();
     objects.push(eyeScene.getObjectByName("Head"));
-    
-	//console.log(objects); 
-	
+
     var controls = new DragControls( objects, camera, renderer.domElement );
+    controls.addEventListener( 'drag', function ( event )
+	{
+            if (event.object.name == "Head")
+                syncHeadParams();
+    } );
     controls.addEventListener( 'hoveron', function ( event ) 
 		{
             orbitControl.enabled = false;
@@ -178,18 +186,250 @@ function createLights(scn)
     scn.add(pointLight);
 }
 
+function addSceneObject(name, geometry, color, x, y, z)
+{
+    var material = new THREE.MeshPhongMaterial( { color: color } );
+    var mesh = new THREE.Mesh(geometry, material);
+    mesh.name = name;
+    mesh.position.set(x, y, z);
+    sceneRoot.add(mesh);
+    draggableObjects.push(mesh);
+    return mesh;
+}
+
 function createScene()
 {
     scene = new THREE.Scene();
+    sceneRoot = new THREE.Group();
+    scene.add(sceneRoot);
 
-    var geometry = new TeapotGeometry( 40, 15);
-    var material = new THREE.MeshPhongMaterial( { color: 0xffffff } );
-    var teapot = new THREE.Mesh(geometry, material);
-    teapot.name = "Teapot";
-    teapot.position.z-=70;
-    scene.add( teapot );
-                
+    addSceneObject("Teapot", new TeapotGeometry(40, 15), 0xffffff, 0, 0, -70);
+    addSceneObject("Knot", new THREE.TorusKnotGeometry(18, 5, 128, 16), 0xff8844, -110, 20, -40);
+    addSceneObject("Box", new THREE.BoxGeometry(40, 40, 40), 0x44aaff, 70, -120, -60);
+    addSceneObject("Ball", new THREE.SphereGeometry(30, 32, 22), 0x66dd66, -60, 60, -260);
+    addSceneObject("Cone", new THREE.ConeGeometry(20, 60, 32), 0xdddd44, 115, -30, 10);
+    addSceneObject("Probe", new THREE.SphereGeometry(4, 16, 12), 0xffff00, -20, 70, -10);
+
     createLights(scene);
+}
+
+function createHelpers()
+{
+    var positions = new Float32Array(displaySurfaces.length * 4 * 2 * 2 * 3);
+    var colors = new Float32Array(positions.length);
+    for (var i = 0; i < positions.length / 3; i++)
+    {
+        var isRight = Math.floor(i / (displaySurfaces.length * 8)) == 1;
+        colors.set(isRight ? [0.2, 0.6, 1.0] : [1.0, 0.2, 0.2], i * 3);
+    }
+    var geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    frustumLines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ vertexColors: true }));
+    frustumLines.frustumCulled = false;
+    frustumLines.visible = showFrustums;
+    eyeScene.add(frustumLines);
+
+    probeRayL = createLine(0xff3333);
+    probeRayR = createLine(0x3399ff);
+    probeHitL = createMarker(0xff3333);
+    probeHitR = createMarker(0x3399ff);
+}
+
+function createLine(color)
+{
+    var geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+    var line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: color }));
+    line.frustumCulled = false;
+    eyeScene.add(line);
+    return line;
+}
+
+function createMarker(color)
+{
+    var marker = new THREE.Mesh(new THREE.SphereGeometry(2, 16, 12), new THREE.MeshBasicMaterial({ color: color }));
+    eyeScene.add(marker);
+    return marker;
+}
+
+function surfaceCorners(s)
+{
+    var p = s.origin;
+    return [p.clone(), p.clone().add(s.u), p.clone().add(s.u).add(s.v), p.clone().add(s.v)];
+}
+
+function updateFrustumLines()
+{
+    frustumLines.visible = showFrustums;
+    if (!showFrustums)
+        return;
+
+    var attribute = frustumLines.geometry.attributes.position;
+    var eyes = [getLeftEyePosition(), getRightEyePosition()];
+    var k = 0;
+    for (var eye of eyes)
+        for (var s of displaySurfaces)
+            for (var corner of surfaceCorners(s))
+            {
+                attribute.setXYZ(k++, eye.x, eye.y, eye.z);
+                attribute.setXYZ(k++, corner.x, corner.y, corner.z);
+            }
+    attribute.needsUpdate = true;
+}
+
+function intersectSurfaces(eye, point)
+{
+    var dir = new THREE.Vector3().subVectors(point, eye);
+    var best = null;
+    for (var s of displaySurfaces)
+    {
+        var normal = new THREE.Vector3().crossVectors(s.u, s.v).normalize();
+        var denom = dir.dot(normal);
+        if (Math.abs(denom) < 1e-9)
+            continue;
+        var t = new THREE.Vector3().subVectors(s.origin, eye).dot(normal) / denom;
+        if (t <= 0 || (best && t >= best.t))
+            continue;
+        var hit = eye.clone().addScaledVector(dir, t);
+        var local = new THREE.Vector3().subVectors(hit, s.origin);
+        var a = local.dot(s.u) / s.u.lengthSq();
+        var b = local.dot(s.v) / s.v.lengthSq();
+        if (a >= 0 && a <= 1 && b >= 0 && b <= 1)
+            best = { t: t, hit: hit, surface: s };
+    }
+    return best;
+}
+
+function setLine(line, from, to)
+{
+    var attribute = line.geometry.attributes.position;
+    attribute.setXYZ(0, from.x, from.y, from.z);
+    attribute.setXYZ(1, to.x, to.y, to.z);
+    attribute.needsUpdate = true;
+}
+
+function updateProbe()
+{
+    var info = document.getElementById('probeInfo');
+    var helpers = [probeRayL, probeRayR, probeHitL, probeHitR];
+    for (var h of helpers)
+        h.visible = showProbe;
+    info.style.display = showProbe ? 'block' : 'none';
+    if (!showProbe)
+        return;
+
+    var probe = scene.getObjectByName("Probe").getWorldPosition(new THREE.Vector3());
+    var eyeL = getLeftEyePosition();
+    var eyeR = getRightEyePosition();
+    var hitL = intersectSurfaces(eyeL, probe);
+    var hitR = intersectSurfaces(eyeR, probe);
+
+    probeRayL.visible = probeHitL.visible = hitL != null;
+    probeRayR.visible = probeHitR.visible = hitR != null;
+    if (hitL) { setLine(probeRayL, eyeL, hitL.hit); probeHitL.position.copy(hitL.hit); }
+    if (hitR) { setLine(probeRayR, eyeR, hitR.hit); probeHitR.position.copy(hitR.hit); }
+
+    if (!hitL || !hitR)
+    {
+        info.textContent = "Probe: not projected onto any display surface";
+        return;
+    }
+    if (hitL.surface != hitR.surface)
+    {
+        info.textContent = "Probe: L on " + hitL.surface.name + ", R on " + hitR.surface.name + " (split across two surfaces)";
+        return;
+    }
+
+    var s = hitL.surface;
+    var parallax = new THREE.Vector3().subVectors(hitR.hit, hitL.hit).dot(s.u.clone().normalize());
+    var normal = new THREE.Vector3().crossVectors(s.u, s.v).normalize();
+    var probeDepth = new THREE.Vector3().subVectors(probe, s.origin).dot(normal);
+    var eyeDist = new THREE.Vector3().subVectors(eyeL.clone().add(eyeR).multiplyScalar(0.5), s.origin).dot(normal);
+    var type = Math.abs(parallax) < 0.05 ? "zero parallax: on the screen plane"
+             : parallax > 0 ? "positive parallax: appears behind the screen"
+             : "negative parallax: appears in front of the screen";
+    info.innerHTML = "Probe on <b>" + s.name + "</b> surface<br>"
+        + "parallax = " + parallax.toFixed(2) + " cm (" + type + ")<br>"
+        + "IOD = " + eyeL.distanceTo(eyeR).toFixed(2) + " cm, eye-screen = " + eyeDist.toFixed(1)
+        + " cm, probe-screen = " + probeDepth.toFixed(1) + " cm";
+}
+
+function updateIOD()
+{
+    eyeScene.getObjectByName("EyeL").position.x = -params.iod / 2;
+    eyeScene.getObjectByName("EyeR").position.x = params.iod / 2;
+}
+
+function updateHead()
+{
+    var head = eyeScene.getObjectByName("Head");
+    head.position.set(params.headX, params.headY, params.headZ);
+    head.rotation.y = THREE.MathUtils.degToRad(params.headYaw);
+}
+
+function syncHeadParams()
+{
+    var head = eyeScene.getObjectByName("Head");
+    params.headX = head.position.x;
+    params.headY = head.position.y;
+    params.headZ = head.position.z;
+}
+
+function updateSceneTransform()
+{
+    sceneRoot.position.set(params.sceneX, params.sceneY, params.sceneZ);
+    sceneRoot.scale.setScalar(params.sceneScale);
+}
+
+function viewFromEye(eye)
+{
+    var head = eyeScene.getObjectByName("Head");
+    var forward = new THREE.Vector3(0, 0, -1).applyQuaternion(head.quaternion);
+    camera.position.copy(eye);
+    orbitControl.target.copy(eye).add(forward);
+    orbitControl.update();
+}
+
+function createGUI()
+{
+    var head = eyeScene.getObjectByName("Head");
+    params = {
+        headX: head.position.x, headY: head.position.y, headZ: head.position.z, headYaw: 0,
+        iod: 6.8,
+        sceneX: 0, sceneY: 0, sceneZ: 0, sceneScale: 1,
+        showScene: showScene, showFrustums: showFrustums, showProbe: showProbe,
+        leftEye: function () { viewFromEye(getLeftEyePosition()); },
+        rightEye: function () { viewFromEye(getRightEyePosition()); },
+        resetView: function ()
+        {
+            camera.position.set(100, 100, 300);
+            orbitControl.target.set(0, 0, 0);
+            orbitControl.update();
+        }
+    };
+
+    gui = new GUI();
+
+    var headFolder = gui.addFolder('Head / eyes');
+    headFolder.add(params, 'headX', -150, 150, 1).name('head x').onChange(updateHead).listen();
+    headFolder.add(params, 'headY', -150, 150, 1).name('head y').onChange(updateHead).listen();
+    headFolder.add(params, 'headZ', -150, 150, 1).name('head z').onChange(updateHead).listen();
+    headFolder.add(params, 'headYaw', -180, 180, 1).name('head yaw (deg)').onChange(updateHead);
+    headFolder.add(params, 'iod', 0, 20, 0.1).name('IOD (cm)').onChange(updateIOD);
+
+    var sceneFolder = gui.addFolder('Scene');
+    sceneFolder.add(params, 'sceneX', -200, 200, 1).name('move x').onChange(updateSceneTransform);
+    sceneFolder.add(params, 'sceneY', -200, 200, 1).name('move y').onChange(updateSceneTransform);
+    sceneFolder.add(params, 'sceneZ', -300, 200, 1).name('move z').onChange(updateSceneTransform);
+    sceneFolder.add(params, 'sceneScale', 0.1, 3, 0.01).name('scale').onChange(updateSceneTransform);
+
+    var viewFolder = gui.addFolder('View');
+    viewFolder.add(params, 'showScene').name('show scene (S)').onChange(function (v) { showScene = v; }).listen();
+    viewFolder.add(params, 'showFrustums').name('show frustums (F)').onChange(function (v) { showFrustums = v; }).listen();
+    viewFolder.add(params, 'showProbe').name('parallax probe (P)').onChange(function (v) { showProbe = v; }).listen();
+    viewFolder.add(params, 'leftEye').name('see from left eye (L)');
+    viewFolder.add(params, 'rightEye').name('see from right eye (R)');
+    viewFolder.add(params, 'resetView').name('reset camera');
 }
 
 // create a scene with 3D objects representing the display surfaces
@@ -342,7 +582,10 @@ var animate = function () {
     // restore state
     renderer.setRenderTarget(null);
     renderer.setClearColor(0x000000);
-  
+
+    updateFrustumLines();
+    updateProbe();
+
     // 3. render display surfaces as (textured) quads
     renderer.render(displaySurfaceScene, camera);
 	
@@ -355,18 +598,27 @@ var animate = function () {
 window.addEventListener( 'keydown', function ( event ) 
 {
         switch ( event.code ) {
-            case 'KeyL': 
-                var eye = getLeftEyePosition();
-                camera.position.set(eye.x, eye.y, eye.z); 
+            case 'KeyL':
+                viewFromEye(getLeftEyePosition());
                 break;
-                
-            case 'KeyR': 
-                var eye = getRightEyePosition();
-                camera.position.set(eye.x, eye.y, eye.z); 
+
+            case 'KeyR':
+                viewFromEye(getRightEyePosition());
                 break;
-                
+
             case 'KeyS':
                 showScene = !showScene;
+                params.showScene = showScene;
+                break;
+
+            case 'KeyF':
+                showFrustums = !showFrustums;
+                params.showFrustums = showFrustums;
+                break;
+
+            case 'KeyP':
+                showProbe = !showProbe;
+                params.showProbe = showProbe;
                 break;
 				
 			case 'KeyT':
@@ -397,6 +649,8 @@ createCamera();		// a third-person camera
 window.addEventListener('resize', onWindowResize);
 enableOrbitCamera(camera, renderer);  // basic camera control
 addDragControlToObjects();	// allow some objects to be dragged
+createHelpers();
+createGUI();
 animate();
 
 

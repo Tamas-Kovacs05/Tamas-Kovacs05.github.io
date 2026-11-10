@@ -53,3 +53,14 @@ a, button, input, select {
 	user-select: none;
 	z-index: 2 !important; /* TODO Solve this in HTML */
 }
+
+#probeInfo {
+	position: absolute;
+	left: 10px;
+	bottom: 10px;
+	padding: 6px 10px;
+	line-height: 18px;
+	background: rgba(0, 0, 0, 0.6);
+	pointer-events: none;
+	z-index: 1;
+}
