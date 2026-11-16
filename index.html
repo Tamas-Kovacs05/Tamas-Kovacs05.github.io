@@ -7,10 +7,10 @@
 </head>
 <body>
 <div id="info">
-	CAVE Simulator. The head, the objects and the yellow probe are draggable. Use the panel to move the head, change the IOD and move/scale the scene. <br />
-	"L" See from Left Eye | "R" See from Right Eye | "S" toggle show scene | "F" toggle frustums | "P" toggle parallax probe <br />
+	CAVE Simulator. The head and objects are draggable. Use the panel to move the head, change the IOD and move/scale the scene. <br />
+	"L" See from Left Eye | "R" See from Right Eye | "S" toggle show scene | "F" toggle frustums <br />
+	VR: enter using the VR button. The virtual eyes follow the headset when "eyes follow headset" is enabled in the panel. <br />
 </div>
-<div id="probeInfo"></div>
 
 <!-- Check: https://threejs.org/docs/index.html#manual/en/introduction/Installation 
 for alternative installations -->
@@ -30,6 +30,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { DragControls } from 'three/addons/controls/DragControls.js';
 import { TeapotGeometry } from 'three/addons/geometries/TeapotGeometry.js';
 import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
 
 class DisplaySurface 
 {
@@ -81,8 +82,11 @@ var orbitControl;
 var showScene = true;
 var sceneRoot, draggableObjects = [];
 var params, gui;
-var frustumLines, probeRayL, probeRayR, probeHitL, probeHitR;
-var showFrustums = false, showProbe = true;
+var frustumLines;
+var showFrustums = false;
+
+var vrRig, vrCamera;
+var eyesFollowHeadset = true;
 
 function addDragControlToObjects()
 {
@@ -155,7 +159,9 @@ function createRenderer()
     renderer.autoClear = false;
     //renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
     document.body.appendChild(renderer.domElement);
+    document.body.appendChild(VRButton.createButton(renderer));
 }
 
 function onWindowResize()
@@ -204,11 +210,9 @@ function createScene()
     scene.add(sceneRoot);
 
     addSceneObject("Teapot", new TeapotGeometry(40, 15), 0xffffff, 0, 0, -70);
-    addSceneObject("Knot", new THREE.TorusKnotGeometry(18, 5, 128, 16), 0xff8844, -110, 20, -40);
     addSceneObject("Box", new THREE.BoxGeometry(40, 40, 40), 0x44aaff, 70, -120, -60);
     addSceneObject("Ball", new THREE.SphereGeometry(30, 32, 22), 0x66dd66, -60, 60, -260);
     addSceneObject("Cone", new THREE.ConeGeometry(20, 60, 32), 0xdddd44, 115, -30, 10);
-    addSceneObject("Probe", new THREE.SphereGeometry(4, 16, 12), 0xffff00, -20, 70, -10);
 
     createLights(scene);
 }
@@ -229,27 +233,6 @@ function createHelpers()
     frustumLines.frustumCulled = false;
     frustumLines.visible = showFrustums;
     eyeScene.add(frustumLines);
-
-    probeRayL = createLine(0xff3333);
-    probeRayR = createLine(0x3399ff);
-    probeHitL = createMarker(0xff3333);
-    probeHitR = createMarker(0x3399ff);
-}
-
-function createLine(color)
-{
-    var geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
-    var line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: color }));
-    line.frustumCulled = false;
-    eyeScene.add(line);
-    return line;
-}
-
-function createMarker(color)
-{
-    var marker = new THREE.Mesh(new THREE.SphereGeometry(2, 16, 12), new THREE.MeshBasicMaterial({ color: color }));
-    eyeScene.add(marker);
-    return marker;
 }
 
 function surfaceCorners(s)
@@ -275,83 +258,6 @@ function updateFrustumLines()
                 attribute.setXYZ(k++, corner.x, corner.y, corner.z);
             }
     attribute.needsUpdate = true;
-}
-
-function intersectSurfaces(eye, point)
-{
-    var dir = new THREE.Vector3().subVectors(point, eye);
-    var best = null;
-    for (var s of displaySurfaces)
-    {
-        var normal = new THREE.Vector3().crossVectors(s.u, s.v).normalize();
-        var denom = dir.dot(normal);
-        if (Math.abs(denom) < 1e-9)
-            continue;
-        var t = new THREE.Vector3().subVectors(s.origin, eye).dot(normal) / denom;
-        if (t <= 0 || (best && t >= best.t))
-            continue;
-        var hit = eye.clone().addScaledVector(dir, t);
-        var local = new THREE.Vector3().subVectors(hit, s.origin);
-        var a = local.dot(s.u) / s.u.lengthSq();
-        var b = local.dot(s.v) / s.v.lengthSq();
-        if (a >= 0 && a <= 1 && b >= 0 && b <= 1)
-            best = { t: t, hit: hit, surface: s };
-    }
-    return best;
-}
-
-function setLine(line, from, to)
-{
-    var attribute = line.geometry.attributes.position;
-    attribute.setXYZ(0, from.x, from.y, from.z);
-    attribute.setXYZ(1, to.x, to.y, to.z);
-    attribute.needsUpdate = true;
-}
-
-function updateProbe()
-{
-    var info = document.getElementById('probeInfo');
-    var helpers = [probeRayL, probeRayR, probeHitL, probeHitR];
-    for (var h of helpers)
-        h.visible = showProbe;
-    info.style.display = showProbe ? 'block' : 'none';
-    if (!showProbe)
-        return;
-
-    var probe = scene.getObjectByName("Probe").getWorldPosition(new THREE.Vector3());
-    var eyeL = getLeftEyePosition();
-    var eyeR = getRightEyePosition();
-    var hitL = intersectSurfaces(eyeL, probe);
-    var hitR = intersectSurfaces(eyeR, probe);
-
-    probeRayL.visible = probeHitL.visible = hitL != null;
-    probeRayR.visible = probeHitR.visible = hitR != null;
-    if (hitL) { setLine(probeRayL, eyeL, hitL.hit); probeHitL.position.copy(hitL.hit); }
-    if (hitR) { setLine(probeRayR, eyeR, hitR.hit); probeHitR.position.copy(hitR.hit); }
-
-    if (!hitL || !hitR)
-    {
-        info.textContent = "Probe: not projected onto any display surface";
-        return;
-    }
-    if (hitL.surface != hitR.surface)
-    {
-        info.textContent = "Probe: L on " + hitL.surface.name + ", R on " + hitR.surface.name + " (split across two surfaces)";
-        return;
-    }
-
-    var s = hitL.surface;
-    var parallax = new THREE.Vector3().subVectors(hitR.hit, hitL.hit).dot(s.u.clone().normalize());
-    var normal = new THREE.Vector3().crossVectors(s.u, s.v).normalize();
-    var probeDepth = new THREE.Vector3().subVectors(probe, s.origin).dot(normal);
-    var eyeDist = new THREE.Vector3().subVectors(eyeL.clone().add(eyeR).multiplyScalar(0.5), s.origin).dot(normal);
-    var type = Math.abs(parallax) < 0.05 ? "zero parallax: on the screen plane"
-             : parallax > 0 ? "positive parallax: appears behind the screen"
-             : "negative parallax: appears in front of the screen";
-    info.innerHTML = "Probe on <b>" + s.name + "</b> surface<br>"
-        + "parallax = " + parallax.toFixed(2) + " cm (" + type + ")<br>"
-        + "IOD = " + eyeL.distanceTo(eyeR).toFixed(2) + " cm, eye-screen = " + eyeDist.toFixed(1)
-        + " cm, probe-screen = " + probeDepth.toFixed(1) + " cm";
 }
 
 function updateIOD()
@@ -397,7 +303,8 @@ function createGUI()
         headX: head.position.x, headY: head.position.y, headZ: head.position.z, headYaw: 0,
         iod: 6.8,
         sceneX: 0, sceneY: 0, sceneZ: 0, sceneScale: 1,
-        showScene: showScene, showFrustums: showFrustums, showProbe: showProbe,
+        showScene: showScene, showFrustums: showFrustums,
+        eyesFollowHeadset: eyesFollowHeadset,
         leftEye: function () { viewFromEye(getLeftEyePosition()); },
         rightEye: function () { viewFromEye(getRightEyePosition()); },
         resetView: function ()
@@ -411,11 +318,11 @@ function createGUI()
     gui = new GUI();
 
     var headFolder = gui.addFolder('Head / eyes');
-    headFolder.add(params, 'headX', -150, 150, 1).name('head x').onChange(updateHead).listen();
-    headFolder.add(params, 'headY', -150, 150, 1).name('head y').onChange(updateHead).listen();
-    headFolder.add(params, 'headZ', -150, 150, 1).name('head z').onChange(updateHead).listen();
+    headFolder.add(params, 'headX', -140, 140, 1).name('head x').onChange(updateHead).listen();
+    headFolder.add(params, 'headY', -140, 140, 1).name('head y').onChange(updateHead).listen();
+    headFolder.add(params, 'headZ', -140, 140, 1).name('head z').onChange(updateHead).listen();
     headFolder.add(params, 'headYaw', -180, 180, 1).name('head yaw (deg)').onChange(updateHead);
-    headFolder.add(params, 'iod', 0, 20, 0.1).name('IOD (cm)').onChange(updateIOD);
+    headFolder.add(params, 'iod', 0, 20, 0.1).name('IOD (cm)').onChange(updateIOD).listen();
 
     var sceneFolder = gui.addFolder('Scene');
     sceneFolder.add(params, 'sceneX', -200, 200, 1).name('move x').onChange(updateSceneTransform);
@@ -426,10 +333,12 @@ function createGUI()
     var viewFolder = gui.addFolder('View');
     viewFolder.add(params, 'showScene').name('show scene (S)').onChange(function (v) { showScene = v; }).listen();
     viewFolder.add(params, 'showFrustums').name('show frustums (F)').onChange(function (v) { showFrustums = v; }).listen();
-    viewFolder.add(params, 'showProbe').name('parallax probe (P)').onChange(function (v) { showProbe = v; }).listen();
     viewFolder.add(params, 'leftEye').name('see from left eye (L)');
     viewFolder.add(params, 'rightEye').name('see from right eye (R)');
     viewFolder.add(params, 'resetView').name('reset camera');
+
+    var vrFolder = gui.addFolder('VR');
+    vrFolder.add(params, 'eyesFollowHeadset').name('eyes follow headset').onChange(function (v) { eyesFollowHeadset = v; }).listen();
 }
 
 // create a scene with 3D objects representing the display surfaces
@@ -465,8 +374,10 @@ function createDisplaySurfaceScene()
 		var center = new THREE.Vector3().addVectors(origin, uHalf);
 		center.add(vHalf);
 		cube.position.set(center.x, center.y, center.z);
-		
+
         displaySurfaceScene.add(cube);
+
+
     }
     
     createLights(displaySurfaceScene);
@@ -477,8 +388,51 @@ function createDisplaySurfaceTargets()
     const SIZE = 1024;  // texture resolution
     displaySurfaceTargets = [];
     
-    for (var v of displaySurfaces)       
+    for (var v of displaySurfaces)
         displaySurfaceTargets.push(new THREE.WebGLRenderTarget(SIZE, SIZE));
+
+
+}
+
+function createVR()
+{
+    vrRig = new THREE.Group();
+    vrRig.position.set(0, -150, 0);
+    vrRig.scale.setScalar(100);
+    eyeScene.add(vrRig);
+
+    vrCamera = new THREE.PerspectiveCamera(50, 1, 0.01, 100);
+    vrRig.add(vrCamera);
+}
+
+function updateHeadFromHeadset()
+{
+    renderer.xr.updateCamera(vrCamera);
+    var cameras = renderer.xr.getCamera().cameras;
+    if (cameras.length < 2)
+        return;
+
+    var eyeL = new THREE.Vector3().setFromMatrixPosition(cameras[0].matrixWorld);
+    var eyeR = new THREE.Vector3().setFromMatrixPosition(cameras[1].matrixWorld);
+    var position = new THREE.Vector3(), orientation = new THREE.Quaternion(), scale = new THREE.Vector3();
+    cameras[0].matrixWorld.decompose(position, orientation, scale);
+
+    params.iod = eyeL.distanceTo(eyeR);
+    updateIOD();
+
+    var head = eyeScene.getObjectByName("Head");
+    head.quaternion.copy(orientation);
+    head.position.copy(eyeL).add(eyeR).multiplyScalar(0.5)
+        .sub(new THREE.Vector3(0, 10, -6).applyQuaternion(orientation));
+    head.updateMatrixWorld(true);
+    syncHeadParams();
+}
+
+function updateVR()
+{
+    vrRig.updateMatrixWorld(true);
+    if (eyesFollowHeadset)
+        updateHeadFromHeadset();
 }
 
 
@@ -545,15 +499,24 @@ function cameraFromViewProj(view, proj)
 // refresh function
 var animate = function () {
     var gl = renderer.getContext();
-    requestAnimationFrame(animate);
+
+    var inVR = renderer.xr.isPresenting;
+    var viewCamera = inVR ? vrCamera : camera;
+    if (inVR)
+        updateVR();
+
+    eyeScene.getObjectByName("Head").visible = !(inVR && eyesFollowHeadset);
+
+    var mainTarget = renderer.getRenderTarget();
 
     // 1. render scene objects
 	renderer.setClearColor(0x808080);
     renderer.clear();
     if (showScene)
-        renderer.render(scene, camera);
-    
+        renderer.render(scene, viewCamera);
+
     // 2. render scene objects onto a texture, for each target
+    renderer.xr.enabled = false;
     for (let [index, displaySurface] of displaySurfaces.entries())
     {
         renderer.setRenderTarget(displaySurfaceTargets[index]);
@@ -580,17 +543,17 @@ var animate = function () {
         gl.colorMask(1, 1, 1, 1);
     }
     // restore state
-    renderer.setRenderTarget(null);
+    renderer.xr.enabled = true;
+    renderer.setRenderTarget(mainTarget);
     renderer.setClearColor(0x000000);
 
     updateFrustumLines();
-    updateProbe();
 
     // 3. render display surfaces as (textured) quads
-    renderer.render(displaySurfaceScene, camera);
-	
+    renderer.render(displaySurfaceScene, viewCamera);
+
 	// 4. render eyes
-    renderer.render(eyeScene, camera);
+    renderer.render(eyeScene, viewCamera);
 	
 };
 
@@ -614,11 +577,6 @@ window.addEventListener( 'keydown', function ( event )
             case 'KeyF':
                 showFrustums = !showFrustums;
                 params.showFrustums = showFrustums;
-                break;
-
-            case 'KeyP':
-                showProbe = !showProbe;
-                params.showProbe = showProbe;
                 break;
 				
 			case 'KeyT':
@@ -651,7 +609,8 @@ enableOrbitCamera(camera, renderer);  // basic camera control
 addDragControlToObjects();	// allow some objects to be dragged
 createHelpers();
 createGUI();
-animate();
+createVR();
+renderer.setAnimationLoop(animate);
 
 
 		</script>
